@@ -1,0 +1,155 @@
+"use strict";
+const {
+    default: makeWASocket,
+    DisconnectReason,
+    useSingleFileAuthState,
+    makeInMemoryStore,
+    downloadContentFromMessage,
+    jidDecode,
+    generateForwardMessageContent,
+    generateWAMessageFromContent
+} = require("@adiwajshing/baileys")
+const fs = require("fs");
+const chalk = require('chalk')
+const logg = require('pino')
+const {
+    serialize,
+    fetchJson,
+    sleep,
+    getBuffer
+} = require("./lib/myfunc");
+const {
+    nocache,
+    uncache
+} = require('./lib/chache.js');
+const {
+    groupResponse_Welcome,
+    groupResponse_Remove,
+    groupResponse_Promote,
+    groupResponse_Demote
+} = require('./lib/group.js')
+const {
+    imageToWebp,
+    videoToWebp,
+    writeExifImg,
+    writeExifVid
+} = require('./lib/Upload_Url')
+let setting = JSON.parse(fs.readFileSync('./setting.json'));
+let session = `./${global.sessionName}.json`
+const {
+    state,
+    saveState
+} = useSingleFileAuthState(session)
+
+const memory = makeInMemoryStore({
+    logger: logg().child({
+        level: 'fatal',
+        stream: 'store'
+    })
+})
+const connectToWhatsApp = async () => {
+    const conn = makeWASocket({
+        printQRInTerminal: true,
+        logger: logg({
+            level: 'fatal'
+        }),
+        browser: [`${global.botName}`, 'Safari', '1.0.0'],
+        auth: state
+    })
+    memory.bind(conn.ev)
+
+    conn.ev.on('messages.upsert', async m => {
+        var msg = m.messages[0]
+        if (!m.messages) return;
+        if (msg.key && msg.key.remoteJid == "status@broadcast") return
+        msg = serialize(conn, msg)
+        msg.isBaileys = msg.key.id.startsWith('BAE5') || msg.key.id.startsWith('3EB0')
+        require('./djong')(conn, msg, m, setting, memory)
+    })
+
+    conn.ev.on('creds.update', () => saveState)
+
+    conn.reply = (from, content, msg) => conn.sendMessage(from, {
+        text: content
+    }, {
+        quoted: msg
+    })
+
+    conn.ev.on('connection.update', (update) => {
+        console.log('Connection update:', update)
+        if (update.connection === 'open')
+            console.log("Connected with " + conn.user.id)
+        else if (update.connection === 'close')
+            connectToWhatsApp()
+    })
+
+
+
+    conn.sendImage = async (jid, path, caption = '', quoted = '', options) => {
+        let buffer = Buffer.isBuffer(path) ? path : /^data:.*?\/.*?;base64,/i.test(path) ? Buffer.from(path.split`,` [1], 'base64') : /^https?:\/\//.test(path) ? await (await getBuffer(path)) : fs.existsSync(path) ? fs.readFileSync(path) : Buffer.alloc(0)
+        return await conn.sendMessage(jid, {
+            image: buffer,
+            caption: caption,
+            ...options
+        }, {
+            quoted
+        })
+    }
+
+    conn.decodeJid = (jid) => {
+        if (!jid) return jid
+        if (/:\d+@/gi.test(jid)) {
+            let decode = jidDecode(jid) || {}
+            return decode.user && decode.server && decode.user + '@' + decode.server || jid
+        } else return jid
+    }
+
+    conn.sendImageAsSticker = async (jid, path, quoted, options = {}) => {
+        let buff = Buffer.isBuffer(path) ? path : /^data:.*?\/.*?;base64,/i.test(path) ? Buffer.from(path.split`,` [1], 'base64') : /^https?:\/\//.test(path) ? await (await getBuffer(path)) : fs.existsSync(path) ? fs.readFileSync(path) : Buffer.alloc(0)
+        let buffer
+        if (options && (options.packname || options.author)) {
+            buffer = await writeExifImg(buff, options)
+        } else {
+            buffer = await imageToWebp(buff)
+        }
+        await conn.sendMessage(jid, {
+                sticker: {
+                    url: buffer
+                },
+                ...options
+            }, {
+                quoted
+            })
+            .then(response => {
+                fs.unlinkSync(buffer)
+                return response
+            })
+    }
+
+    conn.sendVideoAsSticker = async (jid, path, quoted, options = {}) => {
+        let buff = Buffer.isBuffer(path) ? path : /^data:.*?\/.*?;base64,/i.test(path) ? Buffer.from(path.split`,` [1], 'base64') : /^https?:\/\//.test(path) ? await (await getBuffer(path)) : fs.existsSync(path) ? fs.readFileSync(path) : Buffer.alloc(0)
+        let buffer
+        if (options && (options.packname || options.author)) {
+            buffer = await writeExifVid(buff, options)
+        } else {
+            buffer = await videoToWebp(buff)
+        }
+        await conn.sendMessage(jid, {
+                sticker: {
+                    url: buffer
+                },
+                ...options
+            }, {
+                quoted
+            })
+            .then(response => {
+                fs.unlinkSync(buffer)
+                return response
+            })
+    }
+
+
+    return conn
+}
+connectToWhatsApp()
+    .catch(err => console.log(err))
